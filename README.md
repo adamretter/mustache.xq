@@ -20,8 +20,9 @@ Mustache.xq is designed to help you when:
 2. Want to render json as a string
 3. Internationalization
 
-Mustache.xq was designed using [MarkLogic][4] Server but can be 
-used in any XQuery processor
+Mustache.xq was designed using [MarkLogic][4] Server but has been adapter to also run on eXist-db[6].
+Since the port to eXist-db, it should now be relatively trivial to support any XQuery 3.0 compliant processor by adding an implementation to lib/processor.
+
 
 ## Usage
 
@@ -29,7 +30,7 @@ A quick example how to use mustache.xq:
 
 ``` xquery
     import module namespace mustache = "mustache.xq"
-     at "mustache.xqy";
+     at "mustache.xq";
     mustache:render( 'Hello {{text}}!', '{ "text": "world"}' )
 ```
 
@@ -97,7 +98,7 @@ Everyone is welcome to contribute.
 The documentation is severely lacking. Feel free to contribute to the wiki if 
 you think something could be improved.
 
-### Running the tests
+### Running the tests (MarkLogic)
 
 To run the tests simply point an MarkLogic HTTP AppServer to the root of mustache.xqy
 
@@ -105,6 +106,18 @@ You can run the tests by accessing:
 (assuming 127.0.0.1 is the host and 8090 is the port)
 
     http://127.0.0.1:8090/test
+
+Make sure all the tests pass before sending in your pull request!
+
+### Running the tests (eXist-db)
+
+To run the tests simply access the mustache.xqy from the REST Server
+
+You can run the tests by accessing:
+(assuming localhost is the host and 8080 is the port)
+
+    http://localhost:8080/exist/rest/db/mustache/test/index.xqy
+
 
 Make sure all the tests pass before sending in your pull request!
 
@@ -196,7 +209,7 @@ on "Contribute" and send in your code
 * Clean up whitespace with "&#x0a;"
 * XQuery Lambdas (still haven't thought about how this magic would look like)
 * Partials
-* Rewrite the compiler for XQuery 1.0 without MarkLogic Extensions
+* Rewrite the compiler for XQuery 3.0
 
 ### Known Limitations
 
@@ -204,21 +217,20 @@ In this section we have the know limitations excluding the features that are not
 To better understand what is supported refer to the Supported Features section
 
 * Test cases can only be run in MarkLogic.
-* Bundled generator is MarkLogic Specific "1.0-ml".
 * Output is returned inside a <div/> tag. This is to support escaping.
 * Key names must be valid QNames (limitation of json.xqy and generator.xqy)
 
 ## Meta
 
-* Code: `git clone git://github.com/dscape/mustache.xq.git`
-* Home: <http://mustache.github.com>
+* Code: `git clone git://github.com/adamretter/mustache.xq.git`
 * Discussion: <http://convore.com/mustache>
-* Bugs: <http://github.com/dscape/mustache.xq/issues>
+* Bugs: <http://github.com/adamretter/mustache.xq/issues>
 
 (oO)--',- in [caos][5]
 
 [1]: http://code.google.com/p/google-ctemplate/
 [2]: http://www.ivan.fomichev.name/2008/05/erlang-template-engine-prototype.html
-[3]: http://github.com/dscape/mustache.xq/issues
+[3]: http://github.com/adamretter/mustache.xq/issues
 [4]: http://marklogic.com
 [5]: http://caos.di.uminho.pt/
+[6]: http://exist-db.org/

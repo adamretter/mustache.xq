@@ -5,13 +5,12 @@
   Please refer to that project for improvements that require changes to this file.
 :)
 
-xquery version "1.0-ml";
+xquery version "3.0";
 module namespace json="http://marklogic.com/json";
 
+import module namespace proc = "http://mustache.xq/processor" at "processor/processor.xqy";
+
 declare default function namespace "http://www.w3.org/2005/xpath-functions";
-declare variable $jsonBits as xs:string* := ();
-declare variable $keyObjectStack as xs:string* := ();
-declare variable $typeStack as xs:string* := ();
 
 (:
 XXX:
@@ -26,128 +25,262 @@ declare function json:jsonToXML(
     $asXML as xs:boolean
 )
 {
+    let $json-state := json:_create-state()
     let $bits := string-to-codepoints(replace($json, "\n", ""))
-    let $set := xdmp:set($jsonBits, for $bit in $bits return codepoints-to-string($bit))
-
-    let $typeBits := json:getType(1)
+    let $json-bits := for $bit in $bits return codepoints-to-string($bit)
+    let $typeBits := json:getType($json-bits, 1)
     let $type := $typeBits[1]
     let $typeEndLocation := $typeBits[2]
     let $location :=
         if($type = ("object", "array", "string", "number"))
         then 1
         else $typeEndLocation
-    let $xmlString := string-join((json:typeToElement("json", $type), json:dispatch($location), "</json>"), "")
+    let $xmlString := string-join((json:typeToElement("json", $type), json:_get-values-from-result(json:dispatch($json-state, $json-bits, $location)), "</json>"), "")
     return
         if($asXML)
-        then xdmp:unquote($xmlString)
+        then proc:parse-with-fixes($xmlString)
         else $xmlString
 };
 
 declare function json:dispatch(
+    $json-state as element(json:state),
+    $json-bits as xs:string*,
     $location as xs:integer
-) as  xs:string*
+) as  element(json:fn-results)
 {
-    let $currentBit := $jsonBits[$location]
+    let $currentBit := $json-bits[$location]
     where exists($currentBit)
     return
-        if($currentBit eq "{" (:":))
-        then json:startObject($location)
-        else if($currentBit eq "}")
-        then json:endObject($location)
-        else if($currentBit eq ":")
-        then json:buildObjectValue($location + 1)
-        else if($currentBit eq "[")
-        then json:startArray($location)
-        else if($currentBit eq "]")
-        then json:endArray($location)
-        else if($currentBit eq "," and $typeStack[last()] eq "object")
-        then (json:endObjectKey(), json:startObjectKey($location + 1))
-        else if($currentBit eq "," and $typeStack[last()] eq "array")
-        then (json:endArrayItem(), json:startArrayItem($location + 1))
-        else if($currentBit eq """")
-        then json:readCharsUntil($location + 1, """")[2]
+        if($currentBit eq "{") then
+            json:startObject($json-state, $json-bits, $location)
+        
+        else if($currentBit eq "}") then
+            json:endObject($json-state, $json-bits, $location)
+        
+        else if($currentBit eq ":") then
+            json:buildObjectValue($json-state, $json-bits, $location + 1)
+            
+        else if($currentBit eq "[") then
+            json:startArray($json-state, $json-bits, $location)
+            
+        else if($currentBit eq "]") then
+            json:endArray($json-state, $json-bits, $location)
+            
+        else if($currentBit eq "," and json:_peek-type-stack($json-state) eq "object") then
+            let $fn-result := json:endObjectKey($json-state) return
+                let $fn-result-2 := json:startObjectKey(json:_get-state-from-result($fn-result), $json-bits, $location + 1) return
+                    json:_merge-result($fn-result, $fn-result-2)
+        
+        else if($currentBit eq "," and json:_peek-type-stack($json-state) eq "array") then
+            let $result := json:endArrayItem() return
+                let $fn-result := json:startArrayItem($json-state, $json-bits, $location + 1) return
+                    json:_pack-result(json:_get-state-from-result($fn-result), ($result, json:_get-values-from-result($fn-result)))
+        
+        else if($currentBit eq """") then
+            let $result := json:readCharsUntil($json-bits, $location + 1, """")[2] return
+                json:_pack-result($json-state, $result)
         else
             (: XXX - Encode unicode :)
-            if($currentBit eq "\")
-            then json:dispatch($location + 2)
-            else json:dispatch($location + 1)
+            if($currentBit eq "\") then
+                json:dispatch($json-state, $json-bits, $location + 2)
+            else
+                json:dispatch($json-state, $json-bits, $location + 1)
 };
 
+declare
+    %private
+function json:_create-state() as element(json:state) {
+    <json:state>
+        <json:type-stack/>
+        <json:key-object-stack/>
+    </json:state>
+};
+
+declare
+    %private
+function json:_push-type-stack($json-state as element(json:state), $type as xs:string) as element(json:state) {
+    <json:state>
+        <json:type-stack>
+            { $json-state/json:type-stack/json:entry }
+            <json:entry>{$type}</json:entry>
+        </json:type-stack>
+        { $json-state/json:key-object-stack }
+    </json:state>
+};
+
+declare
+    %private
+function json:_peek-type-stack($json-state as element(json:state)) as element(json:entry)? {
+    $json-state/json:type-stack/json:entry[last()]
+};
+
+(: removes the top-most element from the stack :)
+declare
+    %private
+function json:_skim-type-stack($json-state as element(json:state)) as element(json:state)? {
+    <json:state>
+        <json:type-stack>
+            { $json-state/json:type-stack/json:entry[position() ne last()] }
+        </json:type-stack>
+        { $json-state/json:key-object-stack }
+    </json:state>
+};
+
+declare
+    %private
+function json:_push-key-object-stack($json-state as element(json:state), $key-object as xs:string) as element(json:state) {
+    <json:state>
+        { $json-state/json:type-stack }
+        <json:key-object-stack>
+            { $json-state/json:key-object-stack/json:entry }
+            <json:entry>{$key-object}</json:entry>
+        </json:key-object-stack>
+    </json:state>
+};
+
+declare
+    %private
+function json:_peek-key-object-stack($json-state as element(json:state)) as element(json:entry)? {
+    $json-state/json:key-object-stack/json:entry[last()]
+};
+
+(: removes the top-most element from the stack :)
+declare
+    %private
+function json:_skim-key-object-stack($json-state as element(json:state)) as element(json:state)? {
+    <json:state>
+        { $json-state/json:type-stack }
+        <json:key-object-stack>
+            { $json-state/json:key-object-stack/json:entry[position() ne last()] }
+        </json:key-object-stack>
+    </json:state>
+};
+
+declare
+    %private
+function json:_get-state-from-result($json-result as element(json:fn-result)) as element(json:state) {
+    $json-result/json:state
+};
+
+declare
+    %private
+function json:_get-values-from-result($json-result as element(json:fn-result)) as xs:string* {
+    for $json-value in $json-result/json:value return
+        string($json-value)
+};
+
+declare
+    %private
+function json:_pack-result($json-state as element(json:state), $values as xs:string*) as element(json:fn-result) {
+    <json:fn-result>
+    {
+        $json-state,
+        for $value in $values return
+            <json:value>{$value}</json:value>
+    }
+    </json:fn-result>
+};
+
+declare
+    %private
+function json:_merge-result($fn-result as element(json:fn-result), $fn-result-2 as element(json:fn-result)) as element(json:result) {
+    json:_pack-result(json:_get-state-from-result($fn-result-2), (json:_get-values-from-result($fn-result), json:_get-values-from-result($fn-result)))
+};
 
 (: Javascript object handling :)
 
 declare function json:startObject(
+    $json-state as element(json:state),
+    $json-bits as xs:string*,
     $location as xs:integer
-) as xs:string*
+) as element(json:fn-result)
 {
-    let $location := json:readCharsUntilNot($location + 1, " ")
+    let $location := json:readCharsUntilNot($json-bits, $location + 1, " ")
     return
-        if($jsonBits[$location] eq "}")
-        then (xdmp:set($typeStack, ($typeStack, "emptyobject")), json:endObject($location))
-        else (xdmp:set($typeStack, ($typeStack, "object")), json:startObjectKey($location))
+        if($json-bits[$location] eq "}") then
+            let $json-state := json:_push-type-stack($json-state, "emptyobject") return
+                json:endObject($json-state, $json-bits, $location)
+        else
+            let $json-state := json:_push-type-stack($json-state, "object") return
+                json:startObjectKey($json-state, $json-bits, $location)
 };
 
 declare function json:endObject(
+    $json-state as element(json:state),
+    $json-bits as xs:string*,
     $location as xs:integer
-) as xs:string*
+) as element(json:fn-result)
 {
-    let $isEmpty := $typeStack[last()] eq "emptyobject"
-    let $set := xdmp:set($typeStack, $typeStack[1 to last() - 1])
-    return
-        if($isEmpty)
-        then json:dispatch($location + 1)
-        else (json:endObjectKey(), json:dispatch($location + 1))
+    let $isEmpty := json:_peek-type-stack($json-state) eq "emptyobject"
+    let $json-state := json:_skim-type-stack($json-state) return
+        if($isEmpty) then 
+            json:dispatch($json-state, $json-bits, $location + 1)
+        else 
+            let $fn-result := json:endObjectKey($json-state) return
+                let $fn-result-2 := json:dispatch(json:_get-state-from-result($fn-result), $json-bits, $location + 1) return
+                    json:_merge-result($fn-result, $fn-result-2)
 };
 
 declare function json:startObjectKey(
+    $json-state as element(json:state),
+    $json-bits as xs:string*,
     $location as xs:integer
-) as xs:string*
+) as element(json:fn-result)
 {
-    let $location := json:readCharsUntilNot($location, " ")
+    let $location := json:readCharsUntilNot($json-bits, $location, " ")
 
     let $valueBits := 
-        if($jsonBits[$location] eq """")
-        then json:readCharsUntil($location + 1, """")
-        else json:readCharsUntil($location, ":")
+        if($json-bits[$location] eq """")
+        then json:readCharsUntil($json-bits, $location + 1, """")
+        else json:readCharsUntil($json-bits, $location, ":")
     let $location :=
-        if($jsonBits[$location] eq """")
+        if($json-bits[$location] eq """")
         then $valueBits[1] + 1
         else $valueBits[1]
     let $keyName := $valueBits[2]
 
-    let $typeBits := json:getType($location + 1)
+    let $typeBits := json:getType($json-bits, $location + 1)
     let $type := $typeBits[1]
-    let $set := xdmp:set($keyObjectStack, ($keyObjectStack, $keyName))
-    return (
-        json:typeToElement($keyName, $type),
-        if($type = ("null", "boolean:true", "boolean:false"))
-        then json:dispatch($typeBits[2])
-        else json:dispatch($location)
-    )
+    
+    let $json-state := json:_push-key-object-stack($json-state, $keyName) return
+    
+        let $result := json:typeToElement($keyName, $type) return
+            
+            let $fn-result :=
+                if($type = ("null", "boolean:true", "boolean:false")) then
+                    json:dispatch($json-state, $json-bits, $typeBits[2])
+                else
+                    json:dispatch($json-state, $json-bits, $location)
+            return
+                json:_pack-result(json:_get-state-from-result($fn-result), ($result, json:_get-values-from-result($fn-result)))
 };
 
 declare function json:endObjectKey(
-) as xs:string*
+    $json-state as element(json:state)
+) as element(json:fn-result)
 {
-    let $latestObjectName := $keyObjectStack[last()]
-    let $set := xdmp:set($keyObjectStack, $keyObjectStack[1 to last() - 1])
-    return concat("</", $latestObjectName, ">")
+    let $latestObjectName := json:_peek-key-object-stack($json-state)
+    let $json-state := json:_skim-key-object-stack($json-state)
+    let $result := concat("</", $latestObjectName, ">") return
+        json:_pack-result($json-state, $result)
 };
 
 declare function json:buildObjectValue(
+    $json-state as element(json:state),
+    $json-bits as xs:string*,
     $location as xs:integer
-) as xs:string*
+) as element(json:fn-result)
 {
-    let $location := json:readCharsUntilNot($location, " ")
-    let $currentBit := $jsonBits[$location]
+    let $location := json:readCharsUntilNot($json-bits, $location, " ")
+    let $currentBit := $json-bits[$location]
     return
         if($currentBit eq ("[", "{") (:":))
-        then json:dispatch($location)
+        then json:dispatch($json-state, $json-bits, $location)
         else
             let $deepValues :=
                 if($currentBit eq """")
-                then json:readCharsUntil($location + 1, ("""", "}"))
-                else json:readCharsUntil($location, (",", "}"))
+                then json:readCharsUntil($json-bits, $location + 1, ("""", "}"))
+                else json:readCharsUntil($json-bits, $location, (",", "}"))
             let $location :=
                 if($currentBit eq """")
                 then $deepValues[1] + 1
@@ -156,61 +289,85 @@ declare function json:buildObjectValue(
                 if($currentBit eq """")
                 then $deepValues[2]
                 else normalize-space($deepValues[2])
-            return ($normalizedValue, json:dispatch($location))
+            return
+                let $result := $normalizedValue return 
+                    let $fn-result := json:dispatch($json-state, $json-bits, $location) return
+                        json:_pack-result(json:_get-state-from-result($fn-result), ($result, json:_get-values-from-result($fn-result)))
 };
 
 
 (: Javascript array handling :)
 
 declare function json:startArray(
+    $json-state as element(json:state),
+    $json-bits as xs:string*,
     $location as xs:integer
-) as xs:string*
+) as element(json:fn-result)
 {
-    let $location := json:readCharsUntilNot($location + 1, " ")
+    let $location := json:readCharsUntilNot($json-bits, $location + 1, " ")
     return
-        if($jsonBits[$location] eq "]")
-        then (xdmp:set($typeStack, ($typeStack, "emptyarray")), json:endArray($location))
-        else (xdmp:set($typeStack, ($typeStack, "array")), json:startArrayItem($location))
+        if($json-bits[$location] eq "]")then
+            let $json-state := json:_push-type-stack($json-state, "emptyarray") return
+                json:endArray($json-state, $json-bits, $location)
+        else
+            let $json-state := json:_push-type-stack($json-state, "array") return
+                json:startArrayItem($json-state, $json-bits, $location)
 };
 
 declare function json:endArray(
+    $json-state as element(json:state),
+    $json-bits as xs:string*,
     $location as xs:integer
-) as xs:string*
+) as element(json:fn-result)
 {
-    let $isEmpty := $typeStack[last()] eq "emptyarray"
-    let $set := xdmp:set($typeStack, $typeStack[1 to last() - 1])
+    let $isEmpty := json:_peek-type-stack($json-state) eq "emptyarray"
+    let $json-state := json:_skim-type-stack($json-state)
     return
-        if($isEmpty)
-        then json:dispatch($location + 1)
-        else (json:endArrayItem(), json:dispatch($location + 1))
+        if($isEmpty)then
+            json:dispatch($json-state, $json-bits, $location + 1)
+        else
+            let $result := json:endArrayItem() return
+                let $fn-result := json:dispatch($json-state, $json-bits, $location + 1) return
+                    json:_pack-result(json:_get-state-from-result($fn-result), ($result, json:_get-values-from-result($fn-result)))
 };
 
 declare function json:startArrayItem(
+    $json-state as element(json:state),
+    $json-bits as xs:string*,
     $location as xs:integer
-) as xs:string*
+) as element(json:fn-result)
 {
-    let $location := json:readCharsUntilNot($location, " ")
-    let $typeBits := json:getType($location)
+    let $location := json:readCharsUntilNot($json-bits, $location, " ")
+    let $typeBits := json:getType($json-bits, $location)
     let $type := $typeBits[1]
     let $typeEndLocation := $typeBits[2]
-    return (
-        json:typeToElement("item", $type),
-        if($type = ("null", "boolean:false", "boolean:true"))
-        then json:dispatch($typeEndLocation)
-        else if($type = ("object", "array"))
-        then json:dispatch($location)
-        else
-            let $valueBits := 
-                if($jsonBits[$location] eq """")
-                then json:readCharsUntil($location + 1, ("""", "]"))
-                else json:readCharsUntil($location, (",", "]"))
-
-            let $location :=
-                if($jsonBits[$location] eq """")
-                then $valueBits[1] + 1
-                else $valueBits[1]
-            return ($valueBits[2], json:dispatch($location))
-    )
+    return
+        
+        let $result := json:typeToElement("item", $type) return
+        
+            let $fn-result :=
+                if($type = ("null", "boolean:false", "boolean:true")) then
+                    json:dispatch($json-state, $json-bits, $typeEndLocation)
+                else if($type = ("object", "array")) then
+                    json:dispatch($json-state, $json-bits, $location)
+                else
+                    let $valueBits := 
+                        if($json-bits[$location] eq """") then
+                            json:readCharsUntil($json-bits, $location + 1, ("""", "]"))
+                        else
+                            json:readCharsUntil($json-bits, $location, (",", "]"))
+                    let $location :=
+                        if($json-bits[$location] eq """") then
+                            $valueBits[1] + 1
+                        else
+                            $valueBits[1]
+                    return
+                        let $int-result := $valueBits[2] return
+                            let $int-fn-result := json:dispatch($json-state, $json-bits, $location) return
+                                json:_pack-result(json:_get-state-from-result($int-fn-result), ($int-result, json:_get-values-from-result($int-fn-result)))
+                        
+            return
+                json:_pack-result(json:_get-state-from-result($fn-result), ($result, json:_get-values-from-result($fn-result)))
 };
 
 declare function json:endArrayItem(
@@ -223,11 +380,12 @@ declare function json:endArrayItem(
 (: Helper functions :)
 
 declare function json:getType(
+    $json-bits as xs:string*,
     $location as xs:integer
 )
 {
-    let $location := json:readCharsUntilNot($location, " ")
-    let $currentBit := $jsonBits[$location]
+    let $location := json:readCharsUntilNot($json-bits, $location, " ")
+    let $currentBit := $json-bits[$location]
     return
         if($currentBit eq """")
         then "string"
@@ -235,11 +393,11 @@ declare function json:getType(
         then "array"
         else if($currentBit eq "{" (:":))
         then "object"
-        else if(string-join($jsonBits[$location to $location + 3], "") eq "null")
+        else if(string-join($json-bits[($location to $location + 3)], "") eq "null")
         then ("null", $location + 4)
-        else if(string-join($jsonBits[$location to $location + 3], "") eq "true")
+        else if(string-join($json-bits[($location to $location + 3)], "") eq "true")
         then ("boolean:true", $location + 4)
-        else if(string-join($jsonBits[$location to $location + 4], "") eq "false")
+        else if(string-join($json-bits[($location to $location + 4)], "") eq "false")
         then ("boolean:false", $location + 5)
         else "number"
 };
@@ -259,25 +417,29 @@ declare function json:typeToElement(
 };
 
 declare function json:readCharsUntil(
+    $json-bits as xs:string*,
     $location as xs:integer,
     $stopChars as xs:string+
-)
+) as xs:string*
 {
-    let $unescapedUnicode := ()
-    let $escaped := false()
+    let $unescapedUnicode := 
+        if($json-bits[$location] eq "\" and $json-bits[$location + 1] eq "u")then
+            let $hex := string-join($json-bits[($location + 2 to $location + 5)], "")
+            return
+                codepoints-to-string(proc:hex-to-integer($hex))
+        else()
+    
+    let $escaped := $json-bits[$location] eq "\" and $json-bits[$location + 1] ne "u"
+    
     let $location :=
-        if($jsonBits[$location] eq "\")
-        then 
-            if($jsonBits[$location + 1] eq "u")
-            then
-                let $hex := string-join($jsonBits[$location + 2 to $location + 5], "")
-                let $set := xdmp:set($unescapedUnicode, codepoints-to-string(xdmp:hex-to-integer($hex)))
-                return $location + 5
+        if($json-bits[$location] eq "\") then 
+            if($json-bits[$location + 1] eq "u") then
+                $location + 5
             else
-                let $set := xdmp:set($escaped, true())
-                return $location + 1
+                $location + 1
         else $location
-    let $currentBit := ($unescapedUnicode, $jsonBits[$location])[1]
+        
+    let $currentBit := ($unescapedUnicode, $json-bits[$location])[1]
     let $currentBit :=
         if($currentBit eq "<")
         then "&amp;lt;"
@@ -288,24 +450,22 @@ declare function json:readCharsUntil(
         if($currentBit = $stopChars and not($escaped))
         then ($location, "")
         else 
-            let $deepValues := json:readCharsUntil($location + 1, $stopChars)
+            let $deepValues := json:readCharsUntil($json-bits, $location + 1, $stopChars)
             let $newLocation := $deepValues[1]
             let $value := $deepValues[2]
             return ($newLocation, concat($currentBit, $value))
 };
 
 declare function json:readCharsUntilNot(
+    $json-bits as xs:string*,
     $location as xs:integer,
     $ignoreChar as xs:string
 ) as xs:integer
 {
-    if($jsonBits[$location] ne $ignoreChar)
+    if($json-bits[$location] ne $ignoreChar)
     then $location
-    else json:readCharsUntilNot($location + 1, $ignoreChar)
+    else json:readCharsUntilNot($json-bits, $location + 1, $ignoreChar)
 };
-
-
-
 
 declare function json:xmlToJson(
     $element as element()
